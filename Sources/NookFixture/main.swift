@@ -23,6 +23,8 @@ final class Fixture: NSObject, NSApplicationDelegate {
             switch info["cmd"] {
             case "open": open(info["title"])
             case "close": windows.first { $0.title == info["title"] }?.close()
+            // Closes the way many apps do: the window object stays alive, just off screen.
+            case "hide": windows.first { $0.title == info["title"] }?.orderOut(nil)
             case "closeAll": windows.forEach { $0.close() }
             case "dialog": dialog(info["title"] ?? "Panel")
             case "minimize": windows.first { $0.title == info["title"] }?.miniaturize(nil)

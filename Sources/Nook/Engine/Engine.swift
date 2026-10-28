@@ -177,6 +177,9 @@ final class Engine: ObservableObject {
             stageManagerOn = stage
             refreshStatus()
         }
+        // Catches closes no notification reported. Right after a Space switch the
+        // cached keys are stale; reconcile handles that case.
+        if started, canTile, Displays.all() == displays { dropVanished() }
     }
 
     func refreshStatus() {
@@ -527,19 +530,10 @@ final class Engine: ObservableObject {
         let onScreen = WindowServer.onScreenIDs()
         let visible = Set(visibleKeys)
         var dirty = changed || all
+        if dropVanished(onScreen: onScreen) { dirty = true }
 
-        for w in Array(windows.values) {
-            if visible.contains(w.key) {
-                if !onScreen.contains(w.id) {
-                    if w.element.role == nil {
-                        forget(w.id) // gone without telling us
-                        dirty = true
-                    } else if !w.element.isMinimized && !(NSRunningApplication(processIdentifier: w.pid)?.isHidden ?? false) && w.mode != .closing {
-                        forget(w.id) // moved to another Space; it rejoins when seen there
-                        dirty = true
-                    }
-                }
-            } else if onScreen.contains(w.id), let f = w.element.frame, let d = Displays.containing(f, in: displays) {
+        for w in Array(windows.values) where !visible.contains(w.key) {
+            if onScreen.contains(w.id), let f = w.element.frame, let d = Displays.containing(f, in: displays) {
                 // Its display or Space went away, or it shows on every Space.
                 let mode = w.mode
                 detach(w)
@@ -558,6 +552,27 @@ final class Engine: ObservableObject {
             }
         }
         if dirty { retileAll() }
+    }
+
+    /// Forgets windows on visible screens that left the window server without
+    /// a destroyed notification: many apps close a window by hiding it, and a
+    /// window moved to another Space rejoins when seen there. Cheap enough to
+    /// run every second.
+    @discardableResult
+    func dropVanished(pid: pid_t? = nil, onScreen: Set<CGWindowID>? = nil) -> Bool {
+        guard started, canTile else { return false }
+        let onScreen = onScreen ?? WindowServer.onScreenIDs()
+        let visible = Set(visibleKeys)
+        var dropped = false
+        for w in Array(windows.values) where (pid == nil || w.pid == pid) && visible.contains(w.key) && !onScreen.contains(w.id) {
+            let gone = w.element.role == nil
+            let parkedElsewhere = w.element.isMinimized || (NSRunningApplication(processIdentifier: w.pid)?.isHidden ?? false)
+            if gone || (!parkedElsewhere && w.mode != .closing) {
+                forget(w.id)
+                dropped = true
+            }
+        }
+        return dropped
     }
 
     // MARK: - Layout
@@ -795,7 +810,7 @@ extension Engine: WindowTrackerDelegate {
                 }
             }
         case .destroyed(let e):
-            if let w = managed(e) { forget(w.id) }
+            if let w = managed(e) { forget(w.id) } else { sweepSoon(pid) }
         case .minimized(let e):
             if let w = managed(e) { park(w) }
         case .restored(let e):
@@ -811,6 +826,8 @@ extension Engine: WindowTrackerDelegate {
             detach(w)
         case .focusChanged(let pid):
             focusChanged(pid: pid)
+            // Focus moves when a window closes, even one the app only hides.
+            sweepSoon(pid)
         case .appHidden(let pid):
             for w in windows.values where w.pid == pid { park(w) }
         case .appShown(let pid):
@@ -818,6 +835,13 @@ extension Engine: WindowTrackerDelegate {
                 guard let self else { return }
                 for e in AXUIElementCreateApplication(pid).windows { self.consider(e, pid: pid, fresh: false) }
             }
+        }
+    }
+
+    /// Checks an app's windows once its close animation has had time to finish.
+    private func sweepSoon(_ pid: pid_t) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
+            self?.dropVanished(pid: pid)
         }
     }
 

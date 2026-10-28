@@ -185,7 +185,8 @@ final class Mouse {
         // If it's still around shortly (a "Save changes?" sheet), it comes back.
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
             guard let self, self.engine.windows[w.id] === w, w.mode == .closing else { return }
-            if w.element.role != nil, !w.element.isMinimized, let d = self.engine.display(for: w.key) {
+            // Apps that hide a closed window keep its element alive; only one still on screen returns.
+            if w.element.role != nil, !w.element.isMinimized, WindowServer.onScreenIDs().contains(w.id), let d = self.engine.display(for: w.key) {
                 self.engine.place(w, on: d, fresh: false)
             } else {
                 self.engine.forget(w.id)

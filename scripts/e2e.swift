@@ -239,6 +239,12 @@ fixture("close", "B")
 s = await_ { $0.tiles.count == 3 && framesMatch($0) }
 check("closing one reflows the rest, order kept", s.order == ["A", "C", "D"], "\(s.order)")
 
+fixture("open", "B")
+s = await_ { $0.tiles.count == 4 && framesMatch($0) }
+fixture("hide", "B")
+s = await_(2) { $0.tiles.count == 3 && $0.id("B") == nil && framesMatch($0) }
+check("a window closed by hiding reflows the rest too", s.order == ["A", "C", "D"], "\(s.order)")
+
 section("layouts")
 onFixtureScreen("layout/columns")
 s = await_ { ($0.screen["layout"] as? String) == "columns" && framesMatch($0) }
