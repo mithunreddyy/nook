@@ -1,0 +1,44 @@
+{
+    "configurations": [
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:nook}",
+            "name": "Debug Nook",
+            "target": "Nook",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug Nook"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:nook}",
+            "name": "Release Nook",
+            "target": "Nook",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release Nook"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:nook}",
+            "name": "Debug NookFixture",
+            "target": "NookFixture",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug NookFixture"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:nook}",
+            "name": "Release NookFixture",
+            "target": "NookFixture",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release NookFixture"
+        }
+    ]
+}

@@ -1,0 +1,14 @@
+#!/bin/sh
+# nook — drive Nook from the shell.
+#   nook retile | toggle | primary | next | previous | grow | shrink | reset
+#   nook float | focus | nopeek | cleanspace | next-screen | cycle-layout
+#   nook swap <left|right|up|down> | layout <grid|columns|rows|side> | count <1-5>
+#   nook settings
+set -e
+if [ $# -eq 0 ] || [ "$1" = "-h" ] || [ "$1" = "--help" ]; then
+  sed -n '2,7p' "$0" | sed 's/^# \{0,1\}//'
+  exit 0
+fi
+verb="$1"; shift
+if [ $# -gt 0 ]; then url="nook://$verb/$1"; else url="nook://$verb"; fi
+exec open -g "$url"
