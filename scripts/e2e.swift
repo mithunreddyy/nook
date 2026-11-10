@@ -179,7 +179,8 @@ sh("pkill", "-x", "Nook")
 sh("pkill", "-x", "NookFixture")
 sh("pkill", "-x", "NookFixtureBig")
 pause(0.6)
-for key in ["screenChoices", "weights", "learnedSizes", "floatRules", "quietNeedsRoom", "excludedApps"] {
+for key in ["screenChoices", "weights", "learnedSizes", "floatRules", "quietNeedsRoom", "excludedApps",
+            "session", "workspaces", "appRules", "customShortcuts"] {
     sh("defaults", "delete", domain, key)
 }
 setJSON("setupComplete", "true")
@@ -193,6 +194,11 @@ setJSON("separateOuterGap", "false")
 setJSON("highlight", "\"none\"")
 setJSON("noPeek", "false")
 setJSON("quickActions", "true")
+setJSON("newWindowPosition", "\"end\"")
+setJSON("windowBar", "\"off\"")
+setJSON("keepShortHeights", "false")
+setJSON("restartIfStuck", "false")
+setJSON("prefix", "\"controlOption\"")
 sh("defaults", "write", domain, "debugOnlyApps", "-array", fixtureID, bigID)
 
 sh("open", nookApp)
@@ -300,6 +306,25 @@ focus(third)
 nook("swap/left")
 s = await_(1.5) { $0.showing(0) != third }
 check("swap past the screen edge with one screen does nothing", s.showing(0) == third || (s.screens.count > 1), "\(s.order)")
+
+section("activating")
+s = await_ { framesMatch($0) }
+func active(_ s: State) -> Int? { s.j["active"] as? Int }
+func idOfTile(_ s: State, _ i: Int) -> Int? { s.showing(i).flatMap(s.id) }
+focus(s.showing(2) ?? "")
+onFixtureScreen("tile/1")
+s = await_ { active($0) == idOfTile($0, 0) }
+check("tile/1 activates the primary window", active(s) != nil && active(s) == idOfTile(s, 0), "\(active(s) ?? -1)")
+nook("focus-to/right")
+s = await_ { active($0) == idOfTile($0, 1) }
+check("focus-to/right goes to the top of the right column", active(s) == idOfTile(s, 1), "\(active(s) ?? -1) vs \(s.order)")
+nook("focus-to/down")
+s = await_ { active($0) == idOfTile($0, 2) }
+check("focus-to/down goes to the window below", active(s) == idOfTile(s, 2), "\(active(s) ?? -1) vs \(s.order)")
+nook("tile/5")
+s = await_(1) { active($0) != idOfTile($0, 2) }
+check("tile/5 with three windows changes nothing", active(s) == idOfTile(s, 2), "\(active(s) ?? -1)")
+check("activating never moves a window", framesMatch(s))
 
 section("sizes")
 s = state()
@@ -422,6 +447,100 @@ fixture("close", s.showing(1) ?? "")
 s = await_ { $0.tileOf("F") != nil }
 check("it joins when a tiled window closes", s.tileOf("F") != nil, "\(s.order)")
 nook("debug/pref?key=overflow&value=stack")
+
+section("split stacks")
+s = await_ { $0.tiles.count == 3 && framesMatch($0) }
+if let top = s.showing(1), let bottom = s.showing(2) {
+    focus(bottom)
+    nook("stack-onto/up")
+    s = await_ { $0.tiles.count == 2 && framesMatch($0) }
+    let tile = s.tiles.last ?? [:]
+    check("stack-onto/up puts the window into the tile above", s.tiles.count == 2 && s.tileOf(top) == s.tileOf(bottom), "\(s.tiles)")
+    check("a stack made that way is split", (tile["split"] as? Bool) == true, "\(tile)")
+    let a = Rect(s.window(top)?["actual"]), b = Rect(s.window(bottom)?["actual"])
+    check("both windows show, one above the other", b.y > a.maxY && abs(a.w - b.w) < 2, "\(a) / \(b)")
+    focus(bottom)
+    nook("taller")
+    s = await_ { Rect($0.window(bottom)?["actual"]).h > b.h + 20 && framesMatch($0) }
+    check("taller grows a row and shrinks its neighbour", Rect(s.window(bottom)?["actual"]).h > b.h + 20, "\(b.h) → \(Rect(s.window(bottom)?["actual"]).h)")
+    nook("split")
+    s = await_ { ($0.tiles.last?["split"] as? Bool) == false && framesMatch($0) }
+    check("split again switches it to tabs", (s.tiles.last?["split"] as? Bool) == false, "\(s.tiles)")
+    focus(bottom)
+    nook("pop")
+    s = await_ { $0.tiles.count == 3 && framesMatch($0) }
+    check("pop takes the window back out into its own tile", s.tiles.count == 3 && s.tileOf(bottom) != s.tileOf(top), "\(s.tiles)")
+}
+
+section("pins and widths")
+s = await_ { framesMatch($0) }
+if let pinnedTitle = s.showing(1) {
+    focus(pinnedTitle)
+    nook("pin")
+    pause(0.3)
+    let other = s.showing(2) ?? ""
+    focus(other)
+    nook("primary")
+    s = await_(1.5) { $0.showing(0) == other }
+    check("a pinned window keeps its tile when another becomes primary", s.tileOf(pinnedTitle) == 1, "\(s.order)")
+    focus(pinnedTitle)
+    nook("pin")
+}
+s = await_ { framesMatch($0) }
+let widthBefore = s.tileFrames.first?.w ?? 0
+focus(s.showing(0) ?? "")
+nook("width")
+s = await_ { abs(($0.tileFrames.first?.w ?? 0) - widthBefore) > 20 && framesMatch($0) }
+let share = (s.tileFrames.first?.w ?? 0) / s.visible.inset(8).w
+check("width steps the window to the next preset", abs((s.tileFrames.first?.w ?? 0) - widthBefore) > 20 && [0.25, 0.33, 0.5, 0.66, 0.75].contains { abs($0 - share) < 0.02 },
+      "\(widthBefore) → \(s.tileFrames.first?.w ?? 0) (\(share))")
+nook("reset")
+s = await_ { framesMatch($0) }
+
+section("workspaces")
+s = await_ { framesMatch($0) }
+let savedOrder = s.order
+nook("workspace/save/e2e")
+pause(0.4)
+if savedOrder.count > 1 {
+    focus(savedOrder[1])
+    nook("primary")
+    s = await_ { $0.order != savedOrder }
+    check("the order changed before loading", s.order != savedOrder, "\(s.order)")
+}
+nook("workspace/load/e2e")
+s = await_ { $0.order == savedOrder && framesMatch($0) }
+check("loading a workspace puts windows back in their saved order", s.order == savedOrder, "\(s.order) vs \(savedOrder)")
+check("loaded windows are in place", framesMatch(s))
+
+section("window bar")
+nook("debug/pref?key=windowBar&value=always")
+// The bar shows a moment before the windows move up, so wait for the room itself.
+func leavesRoom(_ s: State) -> Bool { (s.tileFrames.map(\.maxY).max() ?? .infinity) < s.visible.maxY - 8 - 30 }
+s = await_ { ($0.visuals["windowBars"] ?? 0) >= 1 && leavesRoom($0) && framesMatch($0) }
+check("the window bar shows on a screen with windows", (s.visuals["windowBars"] ?? 0) >= 1, "\(s.visuals)")
+check("tiles leave room for it at the bottom", leavesRoom(s), "\(s.tileFrames.map(\.maxY)) vs \(s.visible.maxY)")
+check("windows moved up to make room", framesMatch(s))
+nook("debug/pref?key=windowBar&value=off")
+s = await_ { ($0.visuals["windowBars"] ?? 0) == 0 && framesMatch($0) }
+check("turning it off removes it and gives the room back", (s.visuals["windowBars"] ?? 0) == 0 && framesMatch(s), "\(s.visuals)")
+
+section("where new windows open")
+onFixtureScreen("count/4")
+s = await_ { framesMatch($0) }
+nook("debug/pref?key=newWindowPosition&value=afterActive")
+pause(0.3)
+if let primary = s.showing(0) {
+    focus(primary)
+    fixture("open", "N")
+    s = await_ { $0.tileOf("N") != nil && framesMatch($0) }
+    check("next to the active window: a new window takes the tile after it", s.tileOf("N") == 1, "\(s.order)")
+    fixture("close", "N")
+    s = await_ { $0.id("N") == nil }
+}
+nook("debug/pref?key=newWindowPosition&value=end")
+onFixtureScreen("count/3")
+s = await_ { framesMatch($0) }
 
 section("shortcuts")
 s = state()

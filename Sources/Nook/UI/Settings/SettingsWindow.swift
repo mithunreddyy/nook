@@ -3,7 +3,7 @@ import Combine
 import SwiftUI
 
 enum SettingsPage: String, CaseIterable {
-    case general, layout, appearance, shortcuts, apps, advanced
+    case general, layout, appearance, shortcuts, apps, workspaces, advanced
 
     var title: String { rawValue.capitalized }
 
@@ -14,6 +14,7 @@ enum SettingsPage: String, CaseIterable {
         case .appearance: "paintbrush"
         case .shortcuts: "keyboard"
         case .apps: "square.grid.3x3"
+        case .workspaces: "rectangle.stack"
         case .advanced: "slider.horizontal.3"
         }
     }
@@ -28,8 +29,8 @@ enum SettingsPage: String, CaseIterable {
     @MainActor var height: CGFloat {
         let prefs = Preferences.shared
         switch self {
-        case .general: return 440
-        case .layout: return 676 + (prefs.separateOuterGap ? Self.row : 0)
+        case .general: return 760
+        case .layout: return 860 + (prefs.separateOuterGap ? Self.row : 0) + (prefs.windowBar != .off ? Self.row : 0)
         case .appearance:
             switch prefs.highlight {
             case .none: return 416
@@ -37,7 +38,8 @@ enum SettingsPage: String, CaseIterable {
             case .borderActive, .borderAll: return 416 + Self.row * 3
             }
         case .shortcuts: return 640
-        case .apps: return 600
+        case .apps: return 640
+        case .workspaces: return 560
         case .advanced: return 660
         }
     }
@@ -50,6 +52,7 @@ enum SettingsPage: String, CaseIterable {
         case .appearance: AppearancePane()
         case .shortcuts: ShortcutsPane()
         case .apps: AppsPane()
+        case .workspaces: WorkspacesPane()
         case .advanced: AdvancedPane()
         }
     }
@@ -110,8 +113,8 @@ final class SettingsWindow: NSObject, NSWindowDelegate, NSToolbarDelegate {
 
         // Settings that reveal more rows resize the window to match.
         let p = Preferences.shared
-        refit = Publishers.Merge(p.$highlight.map { _ in () }, p.$separateOuterGap.map { _ in () })
-            .dropFirst(2)
+        refit = Publishers.Merge3(p.$highlight.map { _ in () }, p.$separateOuterGap.map { _ in () }, p.$windowBar.map { _ in () })
+            .dropFirst(3)
             .receive(on: RunLoop.main)
             .sink { [weak self] in
                 guard let self else { return }
@@ -122,6 +125,7 @@ final class SettingsWindow: NSObject, NSWindowDelegate, NSToolbarDelegate {
     /// Shows a pane and fits the window to it, keeping the top edge in place.
     func select(_ page: SettingsPage, animate: Bool = true) {
         guard let window else { return }
+        ShortcutRecorder.shared.stop()
         model.page = page
         window.title = page.title
         window.toolbar?.selectedItemIdentifier = page.toolbarID
@@ -167,6 +171,7 @@ final class SettingsWindow: NSObject, NSWindowDelegate, NSToolbarDelegate {
     }
 
     func windowWillClose(_ notification: Notification) {
+        ShortcutRecorder.shared.stop()
         // Back to a menu bar-only app once nothing's open.
         DispatchQueue.main.async {
             if !Tour.shared.isVisible { NSApp.setActivationPolicy(.accessory) }

@@ -13,6 +13,8 @@ final class Visuals {
     private var dimmers: [CGDirectDisplayID: ShadePanel] = [:]
     private var cleanBackdrop: ShadePanel?
     private var grips: [String: GripPanel] = [:]
+    /// Windows flagged by `nook notify`, until they're next activated.
+    private var flags: [CGWindowID: (BorderPanel, NSColor)] = [:]
     private var engine: Engine { Engine.shared }
     private var prefs: Preferences { Preferences.shared }
 
@@ -24,6 +26,8 @@ final class Visuals {
             "dimmers": dimmers.values.filter(\.isVisible).count,
             "cleanBackdrop": cleanBackdrop?.isVisible == true ? 1 : 0,
             "grips": grips.values.filter(\.isVisible).count,
+            "windowBars": WindowBar.shared.visibleCount,
+            "flags": flags.count,
         ]
     }
 
@@ -38,6 +42,36 @@ final class Visuals {
         grips.values.forEach { $0.orderOut(nil) }
         grips.removeAll()
         HoverBar.shared.close()
+        WindowBar.shared.hideAll()
+        flags.values.forEach { $0.0.orderOut(nil) }
+    }
+
+    // MARK: - Job flags
+
+    func flag(_ id: CGWindowID, color: NSColor) {
+        let panel = flags[id]?.0 ?? BorderPanel()
+        flags[id] = (panel, color)
+        updateFlags()
+    }
+
+    func unflag(_ id: CGWindowID) {
+        guard let (panel, _) = flags.removeValue(forKey: id) else { return }
+        panel.orderOut(nil)
+    }
+
+    private func updateFlags() {
+        for (id, item) in flags {
+            let (panel, color) = item
+            guard let w = engine.windows[id], let frame = w.assigned ?? w.element.frame else {
+                panel.orderOut(nil)
+                flags[id] = nil
+                continue
+            }
+            let thickness = max(CGFloat(prefs.borderThickness), 3)
+            panel.configure(color: color, thickness: thickness, radius: CGFloat(prefs.cornerRadius))
+            panel.place(ax: frame.insetBy(dx: -thickness, dy: -thickness))
+            panel.order(.above, relativeTo: Int(w.id))
+        }
     }
 
     func update() {
@@ -48,6 +82,8 @@ final class Visuals {
         updateCleanSpace()
         updateGrips()
         HoverBar.shared.refresh()
+        WindowBar.shared.update()
+        updateFlags()
     }
 
     /// Our app was activated: put shades back below the windows they sit under.
@@ -71,7 +107,7 @@ final class Visuals {
 
     /// Tiled windows currently showing on visible screens.
     private var showingWindows: [ManagedWindow] {
-        engine.visibleKeys.flatMap { engine.models[$0]?.showing ?? [] }.compactMap { engine.windows[$0] }
+        engine.visibleKeys.flatMap { engine.models[$0]?.visible ?? [] }.compactMap { engine.windows[$0] }
     }
 
     private func updateBorders() {

@@ -11,7 +11,7 @@ Automatic tiling for macOS. Open a window and it gets a place; close one and the
 └───────────────┘   └───────┴───────┘   └───────┴───────┘   └───────┴───────┘
 ```
 
-Requires macOS 15 or later, and Accessibility access (System Settings → Privacy & Security → Accessibility).
+Requires macOS 15 or later on an Apple silicon or Intel Mac (`scripts/bundle.sh` builds one app for both), and Accessibility access (System Settings → Privacy & Security → Accessibility).
 
 ## Build and run
 
@@ -37,19 +37,37 @@ If Nook stays at "Needs Accessibility access" after you've switched it on, an ol
 |---|---|
 | **Layouts** | Grid (the fold), Columns, Rows, Side. Ultrawide (≥ 2:1) and vertical screens get their own versions. Main window size: Half, 60% or Two-thirds. |
 | **Per screen, per Space** | Each screen keeps its own layout, window count (1–4, or 5 in Side on ultrawide or vertical), sizes and order. |
-| **Stacks** | More windows than tiles stack in the tile you're working in. Native tabs (Terminal, Ghostty) share their window's tile. |
+| **Stacks** | More windows than tiles stack in the tile you're working in. Native tabs (Terminal, Ghostty) share their window's tile. ⌃⌥⌘ + arrow stacks the active window onto its neighbour, up to 5 to a tile. |
+| **Split or tabbed stacks** | ⌃⌥T switches a stack between tabs (one window shows) and split (every window shows, one above the other, like a terminal above its logs). In a split stack, ⌃⌥⇧ ↑↓ moves between rows, ⌃⌥ ↑↓ moves the window up or down, ⌃⌥⇧ = / - changes its height, ⌃⌥E evens the heights, and dragging the line between two rows resizes both. ⌃⌥O takes a window back out. |
+| **Widths** | ⌃⌥W steps the active window through 25, 33, 50, 66 and 75% of the screen. Sizes stay when windows open and close. |
+| **Pins** | ⌃⌥⇧P keeps a window in its place: new and closed windows go around it, and swaps leave it alone. Press again to unpin. |
+| **Swipe** | Hold ⌃⌥ and swipe with two fingers to move to the window that way. Without the keys, apps scroll as usual. |
 | **Rearranging** | ⌘-drag to swap, ⌥⌘-drag to stack, drag onto another screen to move. ⌃⌥ + arrow swaps, and crosses screens at the edge. |
 | **Resizing** | Drag the edge between two windows and the neighbours follow live. Sizes belong to positions and survive swaps, opens and closes. |
 | **Apps that won't shrink** | Nook learns an app's minimum size (asking twice before trusting it), moves split lines to fit it, and floats the window, with a "Needs more room" card, when it can't fit. |
 | **Focus mode** | One window fills the screen; the others stay put underneath. |
 | **No peek** | Dims and blurs everything except the window you're in. |
 | **Clean Space** | The active window on a plain background, for sharing or presenting. |
-| **Tab View** | ⌥⇥ shows every window, screen by screen, where it sits. Arrows move between them spatially. |
+| **Window search** | ⌃⌥S, type a few letters of an app or window title, press Return. Finds minimized windows and hidden apps too. Titles are read only while it's open. |
+| **Tab View and overview** | ⌥⇥ shows every window, screen by screen, where it sits. Arrows move between them spatially. ⌃⌥⇧O opens the same view without holding a key, until you pick a window or press Esc. |
 | **Quick actions** | Rest on the grip above the active window for Primary, Focus, Next screen and Float. Stacks show chips you can click, scroll, close or drag to another tile. |
 | **Highlight** | A border on the active window or on all windows, or a glow. Drawn in the gaps, never over window content. |
 | **Floating** | Float one window (⌃⌥F), exclude whole apps, or tell Nook to always float a dialog by its title's first two words (⌃⌥⇧F). |
 | **Hover focus** | Optional focus-follows-mouse that doesn't steal focus while you type or drag. |
 | **Stage Manager** | Nook pauses while Stage Manager is on. |
+| **Setup check** | Settings → General lists other window managers that are running (Rectangle, Magnet, Amethyst, AeroSpace, yabai and more) and macOS edge tiling, with a button to the right System Settings page. |
+| **Clean quit** | When Nook quits, each tiled window goes back to where it was before Nook moved it. Windows you floated stay where you put them. |
+| **Where new windows open** | At the end (the fold), next to the active window, or as the main window. Each app can have its own choice and its own width (Settings → Apps). |
+| **Session restore** | Window order and stacks on each screen come back after a restart or log-out. Windows are matched by app and a fingerprint of their title; titles themselves are never stored. |
+| **Workspaces** | Save the windows on every screen under a name, and load them again later (Settings → Workspaces). Loading opens apps that aren't running. Each workspace can have its own shortcut, and can be exported to JSON. |
+| **Back after sleep** | After sleep, a screen lock or a display reconnecting, windows go back to their places, and back to the display they came from. |
+| **Window bar** | An optional row of app icons for each screen, at the top or bottom, always or while you hold the shortcut keys. Click to go to a window; drag onto another to swap them. |
+| **Menu bar position** | Optional “2 of 3” beside the menu bar icon. |
+| **Keep window heights** | Optional: a window shorter than its tile keeps its own height. |
+| **Your own shortcuts** | Change any shortcut in Settings → Keyboard, give any action a second one, or add keys to actions with none (layouts, pause, workspaces). |
+| **Restart if stuck** | Optional: Nook opens again if it stops answering or ends by accident. |
+| **Updates** | Optional daily check of GitHub for a newer version, or Check Now in Settings → General. |
+| **Guided tour** | The tour ends with a list of shortcuts that tick off as you try them. |
 | **Activity** | Windows placed this week, keyboard vs mouse, and time saved. Counts only: never titles or app names. |
 
 Added beyond the original brief:
@@ -57,7 +75,7 @@ Added beyond the original brief:
 - **Cycle layouts** with ⌃⌥L, and **move to the next screen** with ⌃⌥N.
 - **Separate outer margin** from the gap between windows.
 - **Move pointer with keyboard focus**, so the cursor follows the window you activate from the keyboard.
-- **Scripting**: every action is a `nook://` URL, and a bundled `nook` CLI wraps them.
+- **Scripting**: every action is a `nook://` URL, and a bundled `nook` CLI wraps them, including `nook workspace save|load <name>`, `nook workspace export <name> <file>` / `import <file>`, `nook focus-app Safari` (also `nook://focus?app=Safari`), and `nook notify success|failure`, which flags the terminal window a long job ran in: `npm test && nook notify success || nook notify failure`.
 - **Config as JSON**: export and import your settings (Settings → Advanced) to keep them in dotfiles.
 - **Shortcut conflict detection**: keys already taken by another app are dimmed, and keys macOS reserves are marked "left to macOS".
 
@@ -68,6 +86,15 @@ The ⌃⌥ prefix can be switched to ⌥⌘ or ⌃⇧ in Settings → Keyboard.
 | Keys | Action |
 |---|---|
 | ⌃⌥ ← → ↑ ↓ | Swap with the neighbour; past the edge, move to the next screen |
+| ⌃⌥⇧ ← → ↑ ↓ | Activate the neighbour; past the edge, the nearest window on the next screen |
+| ⌃⌥ 1 … 5 | Activate window 1 to 5 on this screen (1 is primary) |
+| ⌃⌥ S | Search windows |
+| ⌃⌥⇧ O | Overview of every window |
+| ⌃⌥⌘ ← → ↑ ↓ | Stack onto the neighbour |
+| ⌃⌥ T / ⌃⌥ O | Split or tabbed stack / take out of the stack |
+| ⌃⌥⇧ = / - , ⌃⌥ E | Taller / shorter in a split stack, even heights |
+| ⌃⌥ W | Cycle width |
+| ⌃⌥⇧ P | Pin or unpin |
 | ⌃⌥ ↩ | Make the active window primary |
 | ⌃⌥ ] / [ | Activate the next / previous window |
 | ⌃⌥ \` / ⌃⌥⇧ \` | Next / previous window in this tile's stack |

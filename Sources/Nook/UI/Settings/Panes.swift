@@ -10,6 +10,8 @@ struct GeneralPane: View {
     @ObservedObject private var prefs = Preferences.shared
     @ObservedObject private var engine = Engine.shared
     @State private var loginEnabled = SMAppService.mainApp.status == .enabled
+    @State private var issues = SetupCheck.issues()
+    @ObservedObject private var updates = Updates.shared
 
     var body: some View {
         Form {
@@ -22,9 +24,45 @@ struct GeneralPane: View {
                     LoginItem.set(on)
                     loginEnabled = SMAppService.mainApp.status == .enabled
                 }))
+                Toggle(isOn: $prefs.restoreOnQuit) {
+                    Text("Put windows back when Nook quits")
+                    Text("Each window returns to where it was before Nook tiled it.")
+                }
+                Toggle(isOn: $prefs.restartIfStuck) {
+                    Text("Restart Nook if it gets stuck")
+                    Text("Opens Nook again if it stops answering or ends by accident.")
+                }
+                Toggle(isOn: $prefs.menuBarPosition) {
+                    Text("Show the window's place in the menu bar")
+                    Text("“2 of 3” beside the icon: the active window among this screen's windows.")
+                }
                 LabeledContent("Welcome tour") {
                     Button("Show Tour") { Tour.shared.show() }
                 }
+            }
+            Section {
+                if issues.isEmpty {
+                    Label("Nothing else is moving your windows.", systemImage: "checkmark.circle.fill")
+                        .foregroundStyle(.green)
+                }
+                ForEach(issues) { issue in
+                    LabeledContent {
+                        if let url = issue.settingsURL {
+                            Button("Open Settings") { NSWorkspace.shared.open(url) }
+                        }
+                    } label: {
+                        Label {
+                            Text(issue.title)
+                            Text(issue.detail)
+                        } icon: {
+                            Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                        }
+                    }
+                }
+            } header: {
+                Text("Setup check")
+            } footer: {
+                HStack { Spacer(); Button("Check Again") { issues = SetupCheck.issues() } }
             }
             Section {
                 LabeledContent {
@@ -45,6 +83,33 @@ struct GeneralPane: View {
                          ? "Nook can move and resize windows."
                          : "Turn on Nook in Privacy & Security → Accessibility. If it's already on, choose Re-add Nook.")
                 }
+            }
+            Section {
+                Toggle(isOn: $prefs.checkForUpdates) {
+                    Text("Check for updates once a day")
+                    Text("Asks GitHub for the newest version number. Sends nothing about you.")
+                }
+                LabeledContent {
+                    switch updates.state {
+                    case .available(let r):
+                        Button("Download \(r.version)") { NSWorkspace.shared.open(r.url) }
+                            .buttonStyle(.borderedProminent)
+                    case .checking:
+                        ProgressView().controlSize(.small)
+                    default:
+                        Button("Check Now") { updates.check(manual: true) }
+                    }
+                } label: {
+                    Text("Nook \(Bundle.main.version)")
+                    switch updates.state {
+                    case .upToDate: Text("This is the newest version.")
+                    case .available(let r): Text("Version \(r.version) is out.")
+                    case .failed(let why): Text("Couldn't check: \(why).")
+                    case .idle, .checking: EmptyView()
+                    }
+                }
+            } header: {
+                Text("Updates")
             }
             Section("App Icon") {
                 HStack(spacing: 14) {
@@ -70,6 +135,7 @@ struct GeneralPane: View {
             }
         }
         .formStyle(.grouped)
+        .onAppear { issues = SetupCheck.issues() }
     }
 
     static func swatch(_ color: NSColor) -> NSImage {
@@ -105,6 +171,16 @@ struct LayoutPane: View {
                 }
             }
             Section {
+                Picker(selection: $prefs.newWindowPosition) {
+                    ForEach(InsertPosition.allCases, id: \.self) { Text($0.title).tag($0) }
+                } label: {
+                    Text("New windows open")
+                    Text("Apps can have their own choice in Apps.")
+                }
+                Toggle(isOn: $prefs.keepShortHeights) {
+                    Text("Keep window heights")
+                    Text("A window shorter than its tile keeps its own height instead of stretching.")
+                }
                 Picker(selection: $prefs.overflow) {
                     Text("Stack in the active tile").tag(OverflowMode.stack)
                     Text("Float in the middle").tag(OverflowMode.float)
@@ -117,6 +193,20 @@ struct LayoutPane: View {
                 } label: {
                     Text("Moving to a full screen")
                     Text("What ⌃⌥-arrow and Next Screen do when the other screen is full.")
+                }
+            }
+            Section {
+                Picker(selection: $prefs.windowBar) {
+                    ForEach(WindowBarMode.allCases, id: \.self) { Text($0.title).tag($0) }
+                } label: {
+                    Text("Window bar")
+                    Text("An icon for each window on the screen. Click one to go there; drag one onto another to swap them.")
+                }
+                if prefs.windowBar != .off {
+                    Picker("Position", selection: $prefs.windowBarEdge) {
+                        ForEach(BarEdge.allCases, id: \.self) { Text($0.title).tag($0) }
+                    }
+                    .pickerStyle(.segmented)
                 }
             }
             Section("Spacing") {
@@ -285,7 +375,7 @@ struct ShortcutsPane: View {
                     ForEach(ShortcutPrefix.allCases, id: \.self) { Text($0.title).tag($0) }
                 } label: {
                     Text("Modifier keys")
-                    Text("Every shortcut starts with these.")
+                    Text("Every default shortcut starts with these. Click a shortcut below to change it, or + to add a second one.")
                 }
                 .pickerStyle(.segmented)
                 Toggle(isOn: $prefs.tabViewEnabled) {
@@ -310,22 +400,19 @@ struct ShortcutsPane: View {
                     Text("Waits a moment, and never while you type or drag.")
                 }
                 Toggle("Move the pointer with keyboard focus", isOn: $prefs.mouseFollowsFocus)
+                Toggle(isOn: $prefs.swipeToFocus) {
+                    Text("Swipe to move between windows")
+                    Text("Hold \(prefs.prefix.title) and swipe with two fingers. Without the keys, apps scroll as usual.")
+                }
             }
-            ForEach(["Move", "Activate", "Size", "More", "Windows per screen"], id: \.self) { group in
-                let rows = hotkeys.bindings.filter { $0.group == group }
+            let catalog = Hotkeys.catalog(prefix: prefs.prefix, tabView: prefs.tabViewEnabled)
+            ForEach(["Move", "Activate", "Jump to a window", "Stacks", "Size", "More", "Windows per screen", "Layouts"], id: \.self) { group in
+                let rows = catalog.filter { $0.group == group }
                 if !rows.isEmpty {
                     Section(group) {
-                        ForEach(rows) { b in
-                            LabeledContent(b.command.title) {
-                                HStack(spacing: 8) {
-                                    switch b.state {
-                                    case .leftToMacOS: Text("Used by macOS").font(.caption).foregroundStyle(.secondary)
-                                    case .inUse: Text("In use").font(.caption).foregroundStyle(.orange)
-                                    case .active: EmptyView()
-                                    }
-                                    ShortcutText(text: b.combo.display)
-                                        .opacity(b.state == .active && prefs.shortcutsEnabled ? 1 : 0.5)
-                                }
+                        ForEach(rows) { entry in
+                            LabeledContent(entry.command.title) {
+                                ShortcutField(command: entry.command, defaults: entry.defaults)
                             }
                         }
                     }
@@ -336,6 +423,7 @@ struct ShortcutsPane: View {
                 LabeledContent("Add to a stack", value: "⌥⌘-drag onto another")
                 LabeledContent("Resize", value: "Drag the edge between two")
                 LabeledContent("Move to another screen", value: "Drag onto it")
+                LabeledContent("Move between windows", value: "\(prefs.prefix.title) + two-finger swipe")
             }
         }
         .formStyle(.grouped)
@@ -388,6 +476,42 @@ struct AppsPane: View {
                 }
             }
             Section {
+                if prefs.appRules.isEmpty {
+                    Text("Every app opens new windows the way Layout says.").foregroundStyle(.secondary)
+                }
+                ForEach(prefs.appRules) { rule in
+                    HStack {
+                        Image(nsImage: Self.icon(for: rule.bundleID)).resizable().frame(width: 20, height: 20)
+                        Picker(rule.appName, selection: Binding(
+                            get: { rule.open },
+                            set: { v in
+                                if let i = prefs.appRules.firstIndex(where: { $0.id == rule.id }) { prefs.appRules[i].open = v }
+                            })) {
+                            ForEach(InsertPosition.allCases, id: \.self) { Text($0.title).tag($0) }
+                        }
+                        Picker("Width", selection: Binding(
+                            get: { rule.width },
+                            set: { v in
+                                if let i = prefs.appRules.firstIndex(where: { $0.id == rule.id }) { prefs.appRules[i].width = v }
+                            })) {
+                            Text("Any width").tag(Double?.none)
+                            ForEach([0.25, 0.33, 0.5, 0.66, 0.75], id: \.self) { Text("\(Int($0 * 100))%").tag(Double?.some($0)) }
+                        }
+                        .labelsHidden()
+                        .fixedSize()
+                        .accessibilityLabel("Width for \(rule.appName)")
+                        Button("Remove") { prefs.appRules.removeAll { $0.id == rule.id } }.controlSize(.small)
+                    }
+                }
+            } header: {
+                Text("Where new windows open, and how wide")
+            } footer: {
+                HStack {
+                    Spacer()
+                    Button("Add App…") { chooseRuleApp() }
+                }
+            }
+            Section {
                 if prefs.floatRules.isEmpty {
                     Text("Press \(Engine.shared.hotkeys.combo(for: .alwaysFloat)?.display ?? "⌃⌥⇧F") on a dialog that keeps getting tiled.")
                         .foregroundStyle(.secondary)
@@ -435,6 +559,19 @@ struct AppsPane: View {
             }
         }
         .formStyle(.grouped)
+    }
+
+    private func chooseRuleApp() {
+        let panel = NSOpenPanel()
+        panel.directoryURL = URL(fileURLWithPath: "/Applications")
+        panel.allowedContentTypes = [.application]
+        panel.allowsMultipleSelection = true
+        panel.prompt = "Add"
+        guard panel.runModal() == .OK else { return }
+        for url in panel.urls {
+            guard let id = Bundle(url: url)?.bundleIdentifier, !prefs.appRules.contains(where: { $0.bundleID == id }) else { continue }
+            prefs.appRules.append(AppRule(bundleID: id, appName: Self.name(for: id), open: .first))
+        }
     }
 
     private func chooseApp() {

@@ -39,6 +39,9 @@ enum Debug {
             case "overflow": if let o = OverflowMode(rawValue: v) { p.overflow = o }
             case "quickActions": p.quickActions = v == "1"
             case "gap": if let g = Double(v) { p.gap = g }
+            case "windowBar": if let m = WindowBarMode(rawValue: v) { p.windowBar = m }
+            case "newWindowPosition": if let n = InsertPosition(rawValue: v) { p.newWindowPosition = n }
+            case "keepShortHeights": p.keepShortHeights = v == "1"
             default: break
             }
         case "panel":
@@ -89,6 +92,7 @@ enum Debug {
                     [
                         "windows": t.order.map { Int($0) },
                         "showing": Int(t.showing),
+                        "split": t.split,
                         "frame": rect(i < frames.count ? frames[i] : nil),
                     ] as [String: Any]
                 },

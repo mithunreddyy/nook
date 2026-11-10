@@ -107,6 +107,13 @@ final class Engine: ObservableObject {
     var focusRequest: (id: CGWindowID, until: Date)?
     /// Every window recently activated, newest first (for Tab View).
     var recent: [CGWindowID] = []
+    /// Where each window was before Nook first moved it, AX coordinates, so quitting can put it back.
+    var origins: [CGWindowID: CGRect] = [:]
+    /// An arrangement windows should fall into as they show up (restart, wake, workspace).
+    var waitingArrangement: PendingArrangement?
+    var sessionSaveScheduled = false
+    /// Arrangements of displays that went away, by UUID, for when they come back.
+    var lostScreens: [String: [[SavedWindow]]] = [:]
     var stageManagerOn = false
     var shownStackNotice = false
 
@@ -143,6 +150,7 @@ final class Engine: ObservableObject {
         guard !started else { return }
         started = true
         displays = Displays.all()
+        beginSessionRestore()
         tracker.start()
         reconcile(retileAll: true)
     }
@@ -210,6 +218,8 @@ final class Engine: ObservableObject {
 
     func bump() {
         revision &+= 1
+        scheduleSessionSave()
+        StatusItem.shared?.refreshPosition()
         if case .tiling = status {
             let next = EngineStatus.tiling(windows: tiledCount, focus: !zoomed.isEmpty)
             if next != status { status = next; StatusItem.shared?.refresh() }
@@ -225,6 +235,7 @@ final class Engine: ObservableObject {
                 guard let self else { return }
                 let before = Set(self.displays.map(\.uuid))
                 self.displays = Displays.all()
+                self.rememberLostScreens()
                 if let clean = self.cleanSpace, !self.displays.contains(where: { $0.uuid == clean.key.display }) {
                     self.setCleanSpace(false)
                 }
@@ -238,11 +249,26 @@ final class Engine: ObservableObject {
         let ws = NSWorkspace.shared.notificationCenter
         for name in [NSWorkspace.willSleepNotification, NSWorkspace.screensDidSleepNotification] {
             ws.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
-                MainActor.assumeIsolated { self?.setCleanSpace(false) }
+                MainActor.assumeIsolated {
+                    self?.setCleanSpace(false)
+                    self?.willSleep()
+                }
             }
         }
-        DistributedNotificationCenter.default().addObserver(forName: .init("com.apple.screenIsLocked"), object: nil, queue: .main) { [weak self] _ in
-            MainActor.assumeIsolated { self?.setCleanSpace(false) }
+        for name in [NSWorkspace.didWakeNotification, NSWorkspace.screensDidWakeNotification] {
+            ws.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.didWake() }
+            }
+        }
+        let dnc = DistributedNotificationCenter.default()
+        dnc.addObserver(forName: .init("com.apple.screenIsLocked"), object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.setCleanSpace(false)
+                self?.willSleep()
+            }
+        }
+        dnc.addObserver(forName: .init("com.apple.screenIsUnlocked"), object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.didWake() }
         }
     }
 
@@ -258,9 +284,12 @@ final class Engine: ObservableObject {
             p.$separateOuterGap.map { _ in () }.eraseToAnyPublisher(),
             p.$outerGap.map { _ in () }.eraseToAnyPublisher(),
             p.$highlight.map { _ in () }.eraseToAnyPublisher(),
-            p.$borderThickness.map { _ in () }.eraseToAnyPublisher()
+            p.$borderThickness.map { _ in () }.eraseToAnyPublisher(),
+            p.$windowBar.map { _ in () }.eraseToAnyPublisher(),
+            p.$windowBarEdge.map { _ in () }.eraseToAnyPublisher(),
+            p.$keepShortHeights.map { _ in () }.eraseToAnyPublisher()
         )
-        .dropFirst(9)
+        .dropFirst(12)
         .debounce(for: .milliseconds(60), scheduler: RunLoop.main)
         .sink { [weak self] in self?.retileAll() }
         .store(in: &cancellables)
@@ -277,9 +306,11 @@ final class Engine: ObservableObject {
         Publishers.MergeMany(
             p.$shortcutsEnabled.map { _ in () }.eraseToAnyPublisher(),
             p.$prefix.map { _ in () }.eraseToAnyPublisher(),
-            p.$tabViewEnabled.map { _ in () }.eraseToAnyPublisher()
+            p.$tabViewEnabled.map { _ in () }.eraseToAnyPublisher(),
+            p.$customShortcuts.map { _ in () }.eraseToAnyPublisher(),
+            p.$workspaces.map { _ in () }.eraseToAnyPublisher()
         )
-        .dropFirst(3)
+        .dropFirst(5)
         .receive(on: RunLoop.main)
         .sink { [weak self] in self?.applyShortcuts() }
         .store(in: &cancellables)
@@ -349,8 +380,20 @@ final class Engine: ObservableObject {
 
     func capacity(for d: Display, layout: LayoutKind? = nil, count: Int? = nil) -> Int {
         let kind = layout ?? layoutKind(for: d)
-        let size = d.visible.insetBy(dx: prefs.effectiveOuterGap, dy: prefs.effectiveOuterGap).size
+        let size = workArea(d).size
         return min(count ?? requestedCount(for: d), Layouts.capacity(kind, shape: d.shape, size: size))
+    }
+
+    /// Where tiles go on a screen: inside the margin, leaving room for the
+    /// window bar when it always shows.
+    func workArea(_ d: Display) -> CGRect {
+        var r = d.visible.insetBy(dx: prefs.effectiveOuterGap, dy: prefs.effectiveOuterGap)
+        if prefs.windowBar == .always {
+            let room = WindowBar.height + prefs.effectiveGap
+            if prefs.windowBarEdge == .top { r.origin.y += room }
+            r.size.height -= room
+        }
+        return r
     }
 
     func weightPrefix(_ d: Display) -> String { "\(d.uuid)#\(d.space)|" }
@@ -392,6 +435,8 @@ final class Engine: ObservableObject {
 
         let w = ManagedWindow(id: wid, pid: pid, element: e, app: app, key: d.key)
         windows[wid] = w
+        // Only the first sighting counts: a window back from minimized is already tiled.
+        if origins[wid] == nil { origins[wid] = frame }
         tracker.watch(window: e, pid: pid)
 
         if floatRule(for: w) != nil {
@@ -424,7 +469,8 @@ final class Engine: ObservableObject {
         if let slot = parked.removeValue(forKey: w.id), slot.key == d.key, slot.stacked, slot.tile < model.tiles.count {
             model.stack(w.id, onto: slot.tile)
         } else {
-            switch model.add(w.id, active: active, mode: prefs.overflow) {
+            let position = fresh ? prefs.openPosition(for: w.bundleID) : .end
+            switch model.add(w.id, active: active, mode: prefs.overflow, at: position) {
             case .stacked(let i):
                 if !shownStackNotice {
                     shownStackNotice = true
@@ -441,10 +487,19 @@ final class Engine: ObservableObject {
         models[d.key] = model
         if fresh {
             countPlaced()
+            DispatchQueue.main.async { [weak self] in self?.applyDefaultWidth(w) }
             endFocusMode(on: d.key)
             if let clean = cleanSpace, clean.key == d.key { cleanSpace?.windows.insert(w.id) }
         }
         retile(d.key)
+        if waitingArrangement != nil {
+            if let home = waitingHome(for: w) {
+                move(w, to: home, toward: nil, viaDrag: false)
+                arrangeFromWaiting(home.key)
+            } else {
+                arrangeFromWaiting(d.key)
+            }
+        }
     }
 
     static func same(_ a: CGRect, _ b: CGRect?) -> Bool {
@@ -527,6 +582,7 @@ final class Engine: ObservableObject {
         let fresh = Displays.all()
         let changed = fresh != displays
         displays = fresh
+        if changed { rememberLostScreens() }
         let onScreen = WindowServer.onScreenIDs()
         let visible = Set(visibleKeys)
         var dirty = changed || all
@@ -551,6 +607,7 @@ final class Engine: ObservableObject {
                 }
             }
         }
+        if !lostScreens.isEmpty { returnToReconnectedScreens() }
         if dirty { retileAll() }
     }
 
@@ -602,10 +659,12 @@ final class Engine: ObservableObject {
         for (i, tile) in model.tiles.enumerated() {
             var m = CGSize.zero
             for id in tile.recent {
-                guard let w = windows[id], let learned = prefs.learnedSizes[w.appKey] else { continue }
-                m.width = max(m.width, learned.width ?? 0)
-                m.height = max(m.height, learned.height ?? 0)
+                let learned = windows[id].flatMap { prefs.learnedSizes[$0.appKey] }
+                m.width = max(m.width, learned?.width ?? 0)
+                // A split stack needs room for every row.
+                if tile.split { m.height += max(learned?.height ?? 0, Tile.minRow) } else { m.height = max(m.height, learned?.height ?? 0) }
             }
+            if tile.split { m.height += prefs.effectiveGap * CGFloat(tile.count - 1) }
             if m != .zero { out[i] = m }
         }
         return out
@@ -617,7 +676,7 @@ final class Engine: ObservableObject {
         var model = input ?? models[d.key] ?? ScreenModel(capacity: 1)
         model.setCapacity(capacity(for: d, layout: kind, count: count), mode: prefs.overflow)
         let gap = prefs.effectiveGap
-        let rect = d.visible.insetBy(dx: prefs.effectiveOuterGap, dy: prefs.effectiveOuterGap)
+        let rect = workArea(d)
         var floatOut: [CGWindowID] = []
 
         while true {
@@ -665,9 +724,17 @@ final class Engine: ObservableObject {
         let zoomedID = zoomed[key]
         let clean = cleanSpace?.key == key ? cleanSpace?.windows ?? [] : []
         for (i, tile) in p.model.tiles.enumerated() {
+            if tile.split {
+                // Every window shows, one above the other.
+                for (id, row) in tile.rows(in: p.frames[i], gap: prefs.effectiveGap) where id != skipping && !clean.contains(id) {
+                    guard let w = windows[id] else { continue }
+                    apply(id == zoomedID ? p.rect : row, to: w)
+                }
+                continue
+            }
             for id in tile.recent where id != skipping && !clean.contains(id) {
                 guard let w = windows[id] else { continue }
-                let target = id == zoomedID ? p.rect : p.frames[i]
+                let target = id == zoomedID ? p.rect : keptHeight(p.frames[i], for: w)
                 apply(target, to: w)
             }
         }
@@ -678,6 +745,15 @@ final class Engine: ObservableObject {
         // Auto-floated windows rejoin when there's room again.
         retryAutoFloated(on: d)
         scheduleVerify(key)
+    }
+
+    /// With "Keep window heights", a window shorter than its tile keeps its own height, top-aligned.
+    func keptHeight(_ tile: CGRect, for w: ManagedWindow) -> CGRect {
+        guard prefs.keepShortHeights, let own = origins[w.id]?.height, own < tile.height - 2 else { return tile }
+        let floor = prefs.learnedSizes[w.appKey]?.height ?? 0
+        var r = tile
+        r.size.height = max(own, floor)
+        return r
     }
 
     func apply(_ frame: CGRect, to w: ManagedWindow) {
@@ -767,7 +843,7 @@ final class Engine: ObservableObject {
     func raiseShowing(on key: ScreenKey) {
         guard let model = models[key] else { return }
         for tile in model.tiles where tile.isStack {
-            windows[tile.showing]?.element.perform(kAXRaiseAction)
+            for id in tile.split ? tile.order : [tile.showing] { windows[id]?.element.perform(kAXRaiseAction) }
         }
     }
 
@@ -887,6 +963,7 @@ extension Engine: WindowTrackerDelegate {
     /// Records `id` as the focused window and updates stacks, focus mode and Clean Space.
     func becameActive(_ id: CGWindowID, element e: AXUIElement, pid: pid_t) {
         focusedID = id
+        Visuals.shared.unflag(id)
         recent.removeAll { $0 == id }
         recent.insert(id, at: 0)
         if recent.count > 64 { recent.removeLast() }

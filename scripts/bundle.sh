@@ -11,8 +11,14 @@ VERSION="1.0.0"
 BUILD_NUMBER="$(date +%Y%m%d%H%M)"
 APP="$ROOT/build/Nook.app"
 
-swift build -c release --product Nook
-BIN="$(swift build -c release --product Nook --show-bin-path)/Nook"
+# One app for Apple silicon and Intel Macs. Without Xcode's build system, this Mac's architecture only.
+ARCHS="--arch arm64 --arch x86_64"
+if ! swift build -c release $ARCHS --product Nook; then
+  echo "Universal build unavailable; building for $(uname -m) only"
+  ARCHS=""
+  swift build -c release --product Nook
+fi
+BIN="$(swift build -c release $ARCHS --product Nook --show-bin-path)/Nook"
 
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"

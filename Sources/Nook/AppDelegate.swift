@@ -1,9 +1,13 @@
 import AppKit
+import Combine
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Another Nook is already running: this copy only passes on what it was opened for.
     private var isDuplicate = false
+    private var sigterm: DispatchSourceSignal?
+    private var watching: AnyCancellable?
+    private var swiping: AnyCancellable?
     private static let forwardedURL = Notification.Name("dev.mithun.nook.url")
 
     func applicationWillFinishLaunching(_ notification: Notification) {
@@ -32,10 +36,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let engine = Engine.shared
         engine.boot()
         Mouse.shared.start()
+        Watchdog.apply(Preferences.shared.restartIfStuck)
+        watching = Preferences.shared.$restartIfStuck.dropFirst().removeDuplicates().sink { on in
+            DispatchQueue.main.async { Watchdog.apply(on) }
+        }
+        Updates.shared.start()
+        // Needs Accessibility access: try again whenever the setting or access changes.
+        swiping = Preferences.shared.$swipeToFocus.combineLatest(engine.$trusted).sink { on, trusted in
+            DispatchQueue.main.async { Swipe.shared.apply(on && trusted) }
+        }
+        // `kill` and `pkill` quit cleanly too: windows go back and the watchdog stands down.
+        signal(SIGTERM, SIG_IGN)
+        let term = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
+        term.setEventHandler { NSApp.terminate(nil) }
+        term.resume()
+        sigterm = term
 
         Permissions.askIfExpected()
         if !Preferences.shared.setupComplete || !AX.isTrusted {
             Tour.shared.show()
+        } else {
+            // Another window manager fighting Nook looks like a Nook bug: say so once.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                let names = SetupCheck.runningManagers()
+                guard let first = names.first else { return }
+                let who = names.count == 1 ? first : "\(first) and \(names.count - 1) more"
+                Toast.show("\(who) also moves windows · see Settings → General", on: engine.currentDisplay, symbol: "exclamationmark.triangle")
+            }
         }
     }
 
@@ -45,7 +72,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        guard !isDuplicate else { return }
+        Watchdog.markCleanExit()
         Engine.shared.hotkeys.unregisterAll()
+        Engine.shared.restoreOrigins()
         Visuals.shared.hideAll()
     }
 
@@ -67,11 +97,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             SettingsWindow.shared.show()
             return
         }
+        if url.host == "workspace", handleWorkspaceFile(url) { return }
         guard let command = Command(url: url) else {
             NSLog("Nook: unknown URL \(url)")
             return
         }
         Engine.shared.run(command, from: .script)
+    }
+
+    /// `nook://workspace/export/<name>?file=…` and `nook://workspace/import?file=…`, for the CLI.
+    private func handleWorkspaceFile(_ url: URL) -> Bool {
+        let parts = Array(url.pathComponents.dropFirst())
+        guard let verb = parts.first, verb == "export" || verb == "import" else { return false }
+        let file = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first { $0.name == "file" }?.value
+        guard let file else { return true }
+        let fileURL = URL(fileURLWithPath: (file as NSString).expandingTildeInPath)
+        let engine = Engine.shared
+        do {
+            if verb == "export" {
+                let name = parts.dropFirst().joined(separator: "/")
+                try engine.exportWorkspace(name, to: fileURL)
+                Toast.show("Exported “\(name)”", on: engine.currentDisplay, symbol: "square.and.arrow.up")
+            } else {
+                let ws = try engine.importWorkspace(from: fileURL)
+                Toast.show("Imported “\(ws.name)”", on: engine.currentDisplay, symbol: "square.and.arrow.down")
+            }
+        } catch {
+            Toast.show("Couldn't \(verb) the workspace", on: engine.currentDisplay)
+        }
+        return true
     }
 
     /// Standard edit commands so text fields in Settings get ⌘C/⌘V, plus ⌘W and ⌘Q.

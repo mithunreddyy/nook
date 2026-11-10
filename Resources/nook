@@ -1,14 +1,32 @@
 #!/bin/sh
 # nook — drive Nook from the shell.
 #   nook retile | toggle | primary | next | previous | grow | shrink | reset
-#   nook float | focus | nopeek | cleanspace | next-screen | cycle-layout
-#   nook swap <left|right|up|down> | layout <grid|columns|rows|side> | count <1-5>
-#   nook settings
+#   nook float | focus | nopeek | cleanspace | next-screen | cycle-layout | search
+#   nook swap <left|right|up|down> | focus-to <left|right|up|down> | tile <1-5>
+#   nook layout <grid|columns|rows|side> | count <1-5> | settings
+#   nook stack-onto <left|right|up|down> | pop | split | taller | shorter | even
+#   nook width | pin | overview | focus-app <name or bundle ID>
+#   nook notify <success|failure|info>      flags the terminal this runs in
+#   nook workspace save <name> | load <name>
+#   nook workspace export <name> <file.json> | import <file.json>
 set -e
 if [ $# -eq 0 ] || [ "$1" = "-h" ] || [ "$1" = "--help" ]; then
-  sed -n '2,7p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'
   exit 0
 fi
-verb="$1"; shift
-if [ $# -gt 0 ]; then url="nook://$verb/$1"; else url="nook://$verb"; fi
-exec open -g "$url"
+enc() { printf '%s' "$1" | sed -e 's/%/%25/g' -e 's/ /%20/g' -e 's/#/%23/g' -e 's/?/%3F/g' -e 's/&/%26/g'; }
+abs() { case "$1" in /*) printf '%s' "$1" ;; *) printf '%s/%s' "$(pwd)" "$1" ;; esac; }
+
+if [ "$1" = "workspace" ] && [ "$2" = "export" ] && [ $# -eq 4 ]; then
+  exec open -g "nook://workspace/export/$(enc "$3")?file=$(enc "$(abs "$4")")"
+fi
+if [ "$1" = "workspace" ] && [ "$2" = "import" ] && [ $# -eq 3 ]; then
+  exec open -g "nook://workspace/import?file=$(enc "$(abs "$3")")"
+fi
+# notify passes the shell's process, so Nook can find the terminal window that ran the job.
+if [ "$1" = "notify" ]; then
+  exec open -g "nook://notify/${2:-info}?pid=$PPID"
+fi
+path="$1"; shift
+for a in "$@"; do path="$path/$(enc "$a")"; done
+exec open -g "nook://$path"

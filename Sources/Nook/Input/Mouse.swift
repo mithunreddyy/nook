@@ -48,6 +48,7 @@ final class Mouse {
             finishButtonPress()
         case .flagsChanged:
             if drag != nil { updateDropTarget(flags: e.modifierFlags) }
+            WindowBar.shared.modifiersChanged(e.modifierFlags)
         case .keyDown:
             lastKey = Date()
             hoverTimer?.invalidate()

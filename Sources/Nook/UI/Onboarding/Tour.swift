@@ -40,13 +40,28 @@ final class Tour: NSObject, NSWindowDelegate {
         show()
     }
 
+    /// Starts tiling, then moves on to trying the keys.
     fileprivate func finish() {
         let prefs = Preferences.shared
         prefs.setupComplete = true
         prefs.tilingEnabled = true
         Haptics.success()
-        window?.close()
         Engine.shared.refreshStatus()
+        state.practised = []
+        state.step = .practice
+    }
+
+    fileprivate func close() {
+        window?.close()
+    }
+
+    /// Ticks off a shortcut on the last step when it's used.
+    func practised(_ command: Command) {
+        guard isVisible, state.step == .practice, let task = PracticeTask.all.first(where: { $0.matches(command) }) else { return }
+        if state.practised.insert(task.id).inserted {
+            Haptics.tap()
+            if state.practised.count == PracticeTask.all.count { Haptics.success() }
+        }
     }
 
     func windowWillClose(_ notification: Notification) {
@@ -64,13 +79,31 @@ final class Tour: NSObject, NSWindowDelegate {
 }
 
 enum TourStep: Int, CaseIterable {
-    case welcome, access, ready
+    case welcome, access, ready, practice
+}
+
+/// One shortcut to try on the tour's last step.
+struct PracticeTask: Identifiable {
+    var id: String
+    var title: String
+    var command: Command
+    var matches: (Command) -> Bool
+
+    static let all: [PracticeTask] = [
+        PracticeTask(id: "swap", title: "Swap with a neighbour", command: .swap(.right)) { if case .swap = $0 { true } else { false } },
+        PracticeTask(id: "focus", title: "Move to a neighbour", command: .focus(.right)) { if case .focus = $0 { true } else { false } },
+        PracticeTask(id: "tile", title: "Jump to window 1", command: .focusTile(1)) { if case .focusTile = $0 { true } else { false } },
+        PracticeTask(id: "search", title: "Search windows", command: .search) { $0 == .search },
+        PracticeTask(id: "zoom", title: "Focus mode", command: .focusMode) { $0 == .focusMode },
+        PracticeTask(id: "tabview", title: "See every window", command: .tabView(forward: true)) { if case .tabView = $0 { true } else { false } },
+    ]
 }
 
 @MainActor
 final class TourState: ObservableObject {
     @Published var step: TourStep = .welcome
     @Published var openAtLogin = true
+    @Published var practised: Set<String> = []
 }
 
 struct TourView: View {
@@ -86,6 +119,7 @@ struct TourView: View {
                 case .welcome: welcome
                 case .access: access
                 case .ready: ready
+                case .practice: practice
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -173,6 +207,39 @@ struct TourView: View {
         }
     }
 
+    private var practice: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Try the Keys").font(.title.weight(.semibold))
+                Text("Each one ticks off when you use it. Keep this window open, then press them anywhere.")
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            VStack(spacing: 0) {
+                ForEach(PracticeTask.all) { task in
+                    let done = state.practised.contains(task.id)
+                    HStack(spacing: 12) {
+                        Image(systemName: done ? "checkmark.circle.fill" : "circle")
+                            .foregroundStyle(done ? Color.green : Color.secondary)
+                            .font(.title3)
+                            .contentTransition(.symbolEffect(.replace))
+                        Text(task.title)
+                        Spacer()
+                        Text(engine.hotkeys.combo(for: task.command)?.display ?? "No key")
+                            .font(.callout.monospaced())
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(.vertical, 8)
+                    .accessibilityElement(children: .combine)
+                    .accessibilityValue(done ? "Done" : "Not yet")
+                    if task.id != PracticeTask.all.last?.id { Divider() }
+                }
+            }
+            Text("\(state.practised.count) of \(PracticeTask.all.count) done")
+                .font(.callout).foregroundStyle(.secondary)
+        }
+    }
+
     private func hint(_ keys: String, _ title: String) -> some View {
         VStack(spacing: 2) {
             Text(keys).font(.callout.weight(.medium))
@@ -206,6 +273,10 @@ struct TourView: View {
                     .buttonStyle(.borderedProminent)
                     .keyboardShortcut(.defaultAction)
                     .disabled(!engine.trusted)
+            case .practice:
+                Button(state.practised.count == PracticeTask.all.count ? "Done" : "Finish Later") { Tour.shared.close() }
+                    .buttonStyle(.borderedProminent)
+                    .keyboardShortcut(.defaultAction)
             case .ready:
                 Button("Back") { state.step = engine.trusted ? .welcome : .access }
                 Button("Tidy My Workspace") {

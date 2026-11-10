@@ -26,8 +26,19 @@ final class TabView: ObservableObject {
     private var panel: KeyPanel?
     private var poll: Timer?
     private var order: [CGWindowID] = []
+    /// Opened as the overview: stays until a pick or Esc, not until ⌥ is let go.
+    private var sticky = false
 
     var isOpen: Bool { panel?.isVisible ?? false }
+
+    func openSticky() {
+        if isOpen { close(); return }
+        gather()
+        guard !order.isEmpty else { return }
+        sticky = true
+        selected = order.first
+        show()
+    }
 
     func press(forward: Bool) {
         if isOpen {
@@ -38,6 +49,7 @@ final class TabView: ObservableObject {
         guard !order.isEmpty else { return }
         // Start on the window used before this one, like ⌘⇥ between apps.
         selected = forward ? order[min(1, order.count - 1)] : order.last
+        sticky = false
         show()
     }
 
@@ -74,13 +86,15 @@ final class TabView: ObservableObject {
         let f = (NSScreen.main ?? NSScreen.screens[0]).frame
         p.setFrame(NSRect(x: f.midX - size.width / 2, y: f.midY - size.height / 2, width: size.width, height: size.height), display: true)
         p.onKey = { [weak self] e in self?.key(e) ?? false }
+        p.onResign = { [weak self] in if self?.sticky == true { self?.close() } }
         p.makeKeyAndOrderFront(nil)
         p.orderFrontRegardless()
         poll?.invalidate()
         poll = Timer.scheduledTimer(withTimeInterval: 1.0 / 60, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated {
                 // Letting go of ⌥ switches.
-                if !NSEvent.modifierFlags.contains(.option) { self?.commit() }
+                guard let self, !self.sticky else { return }
+                if !NSEvent.modifierFlags.contains(.option) { self.commit() }
             }
         }
     }
@@ -133,6 +147,8 @@ final class TabView: ObservableObject {
     }
 
     func close() {
+        sticky = false
+        panel?.onResign = nil
         poll?.invalidate()
         poll = nil
         panel?.orderOut(nil)
@@ -143,6 +159,8 @@ final class TabView: ObservableObject {
 /// A panel that takes the keyboard without activating Nook.
 final class KeyPanel: NSPanel {
     var onKey: ((NSEvent) -> Bool)?
+    /// Called when another window takes the keyboard, such as after a click elsewhere.
+    var onResign: (() -> Void)?
 
     init() {
         super.init(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: true)
@@ -155,6 +173,11 @@ final class KeyPanel: NSPanel {
     }
 
     override var canBecomeKey: Bool { true }
+
+    override func resignKey() {
+        super.resignKey()
+        onResign?()
+    }
 
     override func keyDown(with event: NSEvent) {
         if onKey?(event) != true { super.keyDown(with: event) }

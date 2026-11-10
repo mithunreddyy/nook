@@ -6,7 +6,8 @@ import SwiftUI
 final class StatusItem: NSObject {
     static var shared: StatusItem?
 
-    private let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+    private let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+    private var shownPosition = ""
     private var panel: KeyPanel?
     private var outsideMonitor: Any?
 
@@ -23,6 +24,25 @@ final class StatusItem: NSObject {
         item.button?.image = Self.icon(filled: engine.status.isActive, marked: engine.cleanSpace != nil)
         item.button?.toolTip = "Nook — \(engine.status.label)"
         item.button?.setAccessibilityLabel("Nook, \(engine.status.label)")
+        item.button?.imagePosition = .imageLeft
+        shownPosition = "-"
+        refreshPosition()
+    }
+
+    /// "2 of 3" beside the icon: the active window's place among this screen's tiles.
+    func refreshPosition() {
+        let engine = Engine.shared
+        var text = ""
+        if Preferences.shared.menuBarPosition, engine.status.isActive, let w = engine.activeTiled,
+           let model = engine.models[w.key], let i = model.tileIndex(of: w.id) {
+            text = "\(i + 1) of \(model.tiles.count)"
+        }
+        guard text != shownPosition, let button = item.button else { return }
+        shownPosition = text
+        button.attributedTitle = NSAttributedString(string: text.isEmpty ? "" : " " + text, attributes: [
+            .font: NSFont.monospacedDigitSystemFont(ofSize: NSFont.systemFontSize - 1, weight: .medium),
+        ])
+        button.setAccessibilityLabel(text.isEmpty ? "Nook, \(engine.status.label)" : "Nook, window \(text)")
     }
 
     /// Three panes in the fold: filled while tiling, outlined when not.

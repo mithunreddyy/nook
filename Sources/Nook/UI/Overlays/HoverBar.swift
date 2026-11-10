@@ -38,10 +38,11 @@ final class GripPanel: OverlayPanel {
         windowID = window.id
         self.tile = tile
         self.active = active
-        view.segments = tile.isStack ? tile.order.map { $0 == tile.showing } : []
+        // Split: every window shows, so every segment is lit.
+        view.segments = tile.isStack ? tile.order.map { tile.split || $0 == tile.showing } : []
         view.active = active
         view.needsDisplay = true
-        setAccessibilityLabel(tile.isStack ? "Stack of \(tile.count) windows" : "Quick actions")
+        setAccessibilityLabel(tile.isStack ? "\(tile.split ? "Split stack" : "Stack") of \(tile.count) windows" : "Quick actions")
     }
 
     func pointer(inside: Bool) {

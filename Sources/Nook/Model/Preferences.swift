@@ -65,6 +65,65 @@ struct FloatRule: Codable, Hashable, Identifiable {
     }
 }
 
+/// Where one app's new windows open.
+struct AppRule: Codable, Hashable, Identifiable {
+    var bundleID: String
+    var appName: String
+    var open: InsertPosition
+    /// Share of the screen's width its new windows' tile gets (0.25…0.75), or nil to leave sizes alone.
+    var width: Double?
+
+    var id: String { bundleID }
+}
+
+enum WindowBarMode: String, CaseIterable, Codable {
+    case off, whileHolding, always
+
+    var title: String {
+        switch self {
+        case .off: "Off"
+        case .whileHolding: "While holding the shortcut keys"
+        case .always: "Always"
+        }
+    }
+}
+
+enum BarEdge: String, CaseIterable, Codable {
+    case top, bottom
+
+    var title: String { rawValue.capitalized }
+}
+
+extension InsertPosition {
+    var title: String {
+        switch self {
+        case .end: "At the end"
+        case .afterActive: "Next to the active window"
+        case .first: "As the main window"
+        }
+    }
+}
+
+/// One screen of a saved workspace.
+struct WorkspaceScreen: Codable, Hashable {
+    var display: String
+    var name: String
+    var layout: LayoutKind?
+    var count: Int?
+    var tiles: [[SavedWindow]]
+}
+
+/// A saved arrangement of windows to load again later.
+struct Workspace: Codable, Hashable, Identifiable {
+    var name: String
+    var screens: [WorkspaceScreen]
+    var saved: Date
+
+    var id: String { name }
+    var windowCount: Int { screens.reduce(0) { $0 + $1.tiles.reduce(0) { $0 + $1.count } } }
+    var apps: [String] { Array(Set(screens.flatMap { $0.tiles.flatMap { $0.map(\.app) } })).sorted() }
+}
+
 struct LearnedSize: Codable, Hashable {
     var appName: String
     var width: Double?
@@ -90,6 +149,11 @@ final class Preferences: ObservableObject {
     @Published var setupComplete = false { didSet { save("setupComplete", setupComplete) } }
     @Published var iconStyle = IconStyle.graphite { didSet { save("iconStyle", iconStyle) } }
     @Published var cleanBackground = CleanBackground.graphite { didSet { save("cleanBackground", cleanBackground) } }
+    @Published var restoreOnQuit = true { didSet { save("restoreOnQuit", restoreOnQuit) } }
+    @Published var restartIfStuck = false { didSet { save("restartIfStuck", restartIfStuck) } }
+    @Published var checkForUpdates = false { didSet { save("checkForUpdates", checkForUpdates) } }
+    @Published var lastUpdateCheck: Date? { didSet { save("lastUpdateCheck", lastUpdateCheck) } }
+    @Published var menuBarPosition = false { didSet { save("menuBarPosition", menuBarPosition) } }
 
     // Layout
     @Published var layout = LayoutKind.grid { didSet { save("layout", layout) } }
@@ -100,6 +164,10 @@ final class Preferences: ObservableObject {
     @Published var gap: Double = 8 { didSet { save("gap", gap) } }
     @Published var separateOuterGap = false { didSet { save("separateOuterGap", separateOuterGap) } }
     @Published var outerGap: Double = 8 { didSet { save("outerGap", outerGap) } }
+    @Published var newWindowPosition = InsertPosition.end { didSet { save("newWindowPosition", newWindowPosition) } }
+    @Published var keepShortHeights = false { didSet { save("keepShortHeights", keepShortHeights) } }
+    @Published var windowBar = WindowBarMode.off { didSet { save("windowBar", windowBar) } }
+    @Published var windowBarEdge = BarEdge.bottom { didSet { save("windowBarEdge", windowBarEdge) } }
 
     // Highlight
     @Published var highlight = Highlight.none { didSet { save("highlight", highlight) } }
@@ -115,11 +183,14 @@ final class Preferences: ObservableObject {
     @Published var quickActions = true { didSet { save("quickActions", quickActions) } }
     @Published var hoverFocus = false { didSet { save("hoverFocus", hoverFocus) } }
     @Published var mouseFollowsFocus = false { didSet { save("mouseFollowsFocus", mouseFollowsFocus) } }
+    @Published var swipeToFocus = true { didSet { save("swipeToFocus", swipeToFocus) } }
 
     // Keyboard
     @Published var shortcutsEnabled = true { didSet { save("shortcutsEnabled", shortcutsEnabled) } }
     @Published var prefix = ShortcutPrefix.controlOption { didSet { save("prefix", prefix) } }
     @Published var tabViewEnabled = true { didSet { save("tabViewEnabled", tabViewEnabled) } }
+    /// Keys chosen in Settings, by command name. Replaces that command's default keys; empty means none.
+    @Published var customShortcuts: [String: [KeyCombo]] = [:] { didSet { save("customShortcuts", customShortcuts) } }
 
     // Apps
     @Published var excludedApps: [String] = [] { didSet { save("excludedApps", excludedApps) } }
@@ -127,6 +198,12 @@ final class Preferences: ObservableObject {
     @Published var floatRules: [FloatRule] = [] { didSet { save("floatRules", floatRules) } }
     @Published var learnedSizes: [String: LearnedSize] = [:] { didSet { save("learnedSizes", learnedSizes) } }
     @Published var quietNeedsRoom: [String] = [] { didSet { save("quietNeedsRoom", quietNeedsRoom) } }
+    @Published var appRules: [AppRule] = [] { didSet { save("appRules", appRules) } }
+
+    // Sessions and workspaces
+    /// The last arrangement of each screen, by display, to restore after a restart.
+    @Published var session: [String: [[SavedWindow]]] = [:] { didSet { save("session", session) } }
+    @Published var workspaces: [Workspace] = [] { didSet { save("workspaces", workspaces) } }
 
     // Per screen
     @Published var screenChoices: [String: ScreenChoice] = [:] { didSet { save("screenChoices", screenChoices) } }
@@ -180,6 +257,11 @@ final class Preferences: ObservableObject {
         }
     }
 
+    /// Where a window of this app opens: its app rule, else the general choice.
+    func openPosition(for bundleID: String?) -> InsertPosition {
+        appRules.first { $0.bundleID == bundleID }?.open ?? newWindowPosition
+    }
+
     var accentNSColor: NSColor {
         useAccentColor ? .controlAccentColor : (NSColor(hex: customColor) ?? .controlAccentColor)
     }
@@ -214,6 +296,19 @@ final class Preferences: ObservableObject {
         read("setupComplete", &setupComplete)
         read("iconStyle", &iconStyle)
         read("cleanBackground", &cleanBackground)
+        read("restoreOnQuit", &restoreOnQuit)
+        read("restartIfStuck", &restartIfStuck)
+        read("checkForUpdates", &checkForUpdates)
+        read("lastUpdateCheck", &lastUpdateCheck)
+        read("menuBarPosition", &menuBarPosition)
+        read("newWindowPosition", &newWindowPosition)
+        read("keepShortHeights", &keepShortHeights)
+        read("windowBar", &windowBar)
+        read("windowBarEdge", &windowBarEdge)
+        read("customShortcuts", &customShortcuts)
+        read("appRules", &appRules)
+        read("session", &session)
+        read("workspaces", &workspaces)
         read("layout", &layout)
         read("mainSize", &mainSize)
         read("windowsPerScreen", &windowsPerScreen)
@@ -232,6 +327,7 @@ final class Preferences: ObservableObject {
         read("blurOthers", &blurOthers)
         read("quickActions", &quickActions)
         read("hoverFocus", &hoverFocus)
+        read("swipeToFocus", &swipeToFocus)
         read("mouseFollowsFocus", &mouseFollowsFocus)
         read("shortcutsEnabled", &shortcutsEnabled)
         read("prefix", &prefix)
@@ -271,6 +367,17 @@ final class Preferences: ObservableObject {
         var prefix: ShortcutPrefix?
         var tabViewEnabled: Bool?
         var cleanBackground: CleanBackground?
+        var restoreOnQuit: Bool?
+        var restartIfStuck: Bool?
+        var swipeToFocus: Bool?
+        var checkForUpdates: Bool?
+        var menuBarPosition: Bool?
+        var newWindowPosition: InsertPosition?
+        var keepShortHeights: Bool?
+        var windowBar: WindowBarMode?
+        var windowBarEdge: BarEdge?
+        var customShortcuts: [String: [KeyCombo]]?
+        var appRules: [AppRule]?
         var excludedApps: [String]?
         var floatRules: [FloatRule]?
     }
@@ -282,7 +389,10 @@ final class Preferences: ObservableObject {
             highlight: highlight, borderThickness: borderThickness, color: useAccentColor ? "accent" : customColor,
             cornerRadius: cornerRadius, dimAmount: dimAmount, blurOthers: blurOthers, quickActions: quickActions,
             hoverFocus: hoverFocus, mouseFollowsFocus: mouseFollowsFocus, shortcutsEnabled: shortcutsEnabled,
-            prefix: prefix, tabViewEnabled: tabViewEnabled, cleanBackground: cleanBackground,
+            prefix: prefix, tabViewEnabled: tabViewEnabled, cleanBackground: cleanBackground, restoreOnQuit: restoreOnQuit,
+            restartIfStuck: restartIfStuck, swipeToFocus: swipeToFocus, checkForUpdates: checkForUpdates, menuBarPosition: menuBarPosition,
+            newWindowPosition: newWindowPosition, keepShortHeights: keepShortHeights, windowBar: windowBar,
+            windowBarEdge: windowBarEdge, customShortcuts: customShortcuts, appRules: appRules,
             excludedApps: excludedApps, floatRules: floatRules
         )
         let e = JSONEncoder()
@@ -314,6 +424,17 @@ final class Preferences: ObservableObject {
         if let v = c.prefix { prefix = v }
         if let v = c.tabViewEnabled { tabViewEnabled = v }
         if let v = c.cleanBackground { cleanBackground = v }
+        if let v = c.restoreOnQuit { restoreOnQuit = v }
+        if let v = c.restartIfStuck { restartIfStuck = v }
+        if let v = c.swipeToFocus { swipeToFocus = v }
+        if let v = c.checkForUpdates { checkForUpdates = v }
+        if let v = c.menuBarPosition { menuBarPosition = v }
+        if let v = c.newWindowPosition { newWindowPosition = v }
+        if let v = c.keepShortHeights { keepShortHeights = v }
+        if let v = c.windowBar { windowBar = v }
+        if let v = c.windowBarEdge { windowBarEdge = v }
+        if let v = c.customShortcuts { customShortcuts = v }
+        if let v = c.appRules { appRules = v }
         if let v = c.excludedApps { excludedApps = v }
         if let v = c.floatRules { floatRules = v }
     }

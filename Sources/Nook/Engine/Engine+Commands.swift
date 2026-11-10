@@ -19,12 +19,47 @@ extension Engine {
     }
 
     func run(_ command: Command, from source: InputSource) {
+        Tour.shared.practised(command)
+        switch command {
+        case .focus, .focusTile, .focusNext, .focusPrevious, .stackNext, .stackPrevious, .search, .tabView, .loadWorkspace, .saveWorkspace, .notify, .focusApp, .overview:
+            break
+        default:
+            // The user is arranging things: stop pulling windows into an old arrangement.
+            waitingArrangement = nil
+        }
         switch command {
         case .toggleTiling:
             prefs.tilingEnabled.toggle()
             return
         case .tabView(let forward):
+            SearchPanel.shared.close()
             TabView.shared.press(forward: forward)
+            return
+        case .overview:
+            SearchPanel.shared.close()
+            TabView.shared.openSticky()
+            countUse(command, from: source)
+            return
+        case .search:
+            SearchPanel.shared.toggle()
+            countUse(command, from: source)
+            return
+        case .saveWorkspace(let name):
+            guard canTile else { return }
+            saveWorkspace(name)
+            return
+        case .loadWorkspace(let name):
+            guard canTile else { return }
+            countUse(command, from: source)
+            loadWorkspace(name)
+            return
+        case .notify(let status, let pid):
+            guard canTile else { return }
+            notify(status, pid: pid)
+            return
+        case .focusApp(let app):
+            countUse(command, from: source)
+            focusApp(app)
             return
         case .noPeek:
             prefs.noPeek.toggle()
@@ -43,6 +78,8 @@ extension Engine {
 
         switch command {
         case .swap(let dir): swap(toward: dir, keyboard: keyboard)
+        case .focus(let dir): focus(toward: dir, keyboard: keyboard)
+        case .focusTile(let n): focusTile(n, keyboard: keyboard)
         case .makePrimary: makePrimary()
         case .focusNext: cycleFocus(by: 1, keyboard: keyboard)
         case .focusPrevious: cycleFocus(by: -1, keyboard: keyboard)
@@ -65,7 +102,15 @@ extension Engine {
                 Toast.show("\(next.title) · \(capacity(for: d)) windows", on: d)
             }
         case .nextScreen: moveActiveToNextScreen()
-        case .noPeek, .cleanSpace, .toggleTiling, .tabView: break
+        case .stackOnto(let dir): stackOnto(dir)
+        case .popOut: popOut()
+        case .toggleSplit: toggleSplit()
+        case .taller: resizeRow(by: 48)
+        case .shorter: resizeRow(by: -48)
+        case .evenHeights: evenHeights()
+        case .cycleWidth: cycleWidth()
+        case .togglePin: togglePin()
+        case .noPeek, .cleanSpace, .toggleTiling, .tabView, .search, .saveWorkspace, .loadWorkspace, .notify, .focusApp, .overview: break
         }
     }
 
@@ -84,11 +129,51 @@ extension Engine {
     /// Visits tiled windows in layout order, screen by screen, left to right.
     func cycleFocus(by offset: Int, keyboard: Bool) {
         let order = displays.sorted { ($0.frame.minX, $0.frame.minY) < ($1.frame.minX, $1.frame.minY) }
-            .flatMap { models[$0.key]?.showing ?? [] }
+            .flatMap { models[$0.key]?.visible ?? [] }
         guard !order.isEmpty else { return }
         let i = activeID.flatMap { order.firstIndex(of: $0) } ?? (offset > 0 ? -1 : 0)
         let next = order[((i + offset) % order.count + order.count) % order.count]
         if let w = windows[next] { focus(w, keyboard: keyboard) }
+    }
+
+    /// Activates the tile next to the active one. Past the screen's edge, the
+    /// nearest tile on the screen that way.
+    func focus(toward dir: Direction, keyboard: Bool) {
+        if let row = rowNeighbor(dir) {
+            focus(row, keyboard: keyboard)
+            return
+        }
+        guard let w = activeTiled, let frames = tileFrames[w.key], let model = models[w.key],
+              let i = model.tileIndex(of: w.id), i < frames.count else {
+            // Nothing tiled is active yet: start from this screen's primary window.
+            if let d = currentDisplay, let id = models[d.key]?.showing.first, let first = windows[id] {
+                focus(first, keyboard: keyboard)
+            }
+            return
+        }
+        if let j = Self.neighbor(of: i, toward: dir, in: frames), j < model.tiles.count, let next = windows[model.tiles[j].showing] {
+            focus(next, keyboard: keyboard)
+            return
+        }
+        guard let d = display(for: w.key), let target = Displays.neighbor(of: d, toward: dir, in: displays),
+              let targetFrames = tileFrames[target.key], let targetModel = models[target.key],
+              let source = w.element.frame else { return }
+        let n = min(targetFrames.count, targetModel.tiles.count)
+        guard n > 0 else { return }
+        let entry = Self.entryPoint(into: target, from: source, toward: dir)
+        let j = (0..<n).min { Displays.distance(targetFrames[$0], entry) < Displays.distance(targetFrames[$1], entry) } ?? 0
+        if let next = windows[targetModel.tiles[j].showing] { focus(next, keyboard: keyboard) }
+    }
+
+    /// Activates the window in tile `n` (1 is primary) on the screen in use.
+    func focusTile(_ n: Int, keyboard: Bool) {
+        guard let d = currentDisplay else { return }
+        let tiles = models[d.key]?.tiles ?? []
+        guard n >= 1, n <= tiles.count, let w = windows[tiles[n - 1].showing] else {
+            Toast.show(tiles.isEmpty ? "No windows on this screen" : tiles.count == 1 ? "Only 1 window on this screen" : "Only \(tiles.count) windows on this screen", on: d)
+            return
+        }
+        focus(w, keyboard: keyboard)
     }
 
     func cycleStack(by offset: Int) {
@@ -115,6 +200,7 @@ extension Engine {
     // MARK: - Swapping
 
     func swap(toward dir: Direction, keyboard: Bool) {
+        if moveInStack(dir) { return }
         guard let w = activeTiled, let frames = tileFrames[w.key], let model = models[w.key],
               let i = model.tileIndex(of: w.id), i < frames.count else { return }
         endFocusMode(on: w.key)
@@ -158,6 +244,17 @@ extension Engine {
             if abs(gx - gy) > 1 { return gx < gy }
             return dir == .left || dir == .right ? bx.minY < by.minY : bx.minX < by.minX
         }
+    }
+
+    /// Swaps two tiles' windows (window bar drags).
+    func swapTiles(_ a: Int, _ b: Int, on key: ScreenKey) {
+        guard var model = models[key], model.tiles.indices.contains(a), model.tiles.indices.contains(b) else { return }
+        endFocusMode(on: key)
+        waitingArrangement = nil
+        model.swap(a, b)
+        models[key] = model
+        retile(key)
+        countUse(.swap(a < b ? .right : .left), from: .mouse)
     }
 
     func makePrimary() {
@@ -292,7 +389,44 @@ extension Engine {
         guard let tree = p.tree, let i = p.model.tileIndex(of: w.id) else { return }
         var solver = Solver(tree: tree, rect: p.rect, gap: prefs.effectiveGap, weights: prefs.weights[p.weightKey] ?? [:], minimums: p.minimums)
         var moved = false
-        for (edge, coordinate) in Solver.changedEdges(from: old, to: frame) {
+        var edges = Solver.changedEdges(from: old, to: frame)
+        // In a split stack, a top or bottom edge between two rows moves that line, not the tile's.
+        if i < p.frames.count, p.model.tiles[i].split, var model = models[w.key], let t = model.tileIndex(of: w.id) {
+            let tile = model.tiles[t]
+            let rows = tile.rows(in: p.frames[i], gap: prefs.effectiveGap)
+            if let r = rows.firstIndex(where: { $0.0 == w.id }) {
+                var rowsMoved = false
+                for (edge, y) in edges {
+                    if edge == .top, r > 0 {
+                        model.edit(tile: t) { $0.moveBoundary(after: r - 1, to: y - self.prefs.effectiveGap, in: p.frames[i], gap: self.prefs.effectiveGap) }
+                        rowsMoved = true
+                    } else if edge == .bottom, r < rows.count - 1 {
+                        model.edit(tile: t) { $0.moveBoundary(after: r, to: y, in: p.frames[i], gap: self.prefs.effectiveGap) }
+                        rowsMoved = true
+                    }
+                }
+                edges.removeAll { ($0.0 == .top && r > 0) || ($0.0 == .bottom && r < rows.count - 1) }
+                if rowsMoved {
+                    models[w.key] = model
+                    if edges.isEmpty {
+                        if live {
+                            layout(w.key, skipping: w.id)
+                            w.assigned = frame
+                            Visuals.shared.update()
+                        } else {
+                            retile(w.key)
+                        }
+                        return
+                    }
+                }
+            }
+        }
+        // A window keeping its own short height: its bottom edge is its own, not the tile's.
+        if i < p.frames.count, keptHeight(p.frames[i], for: w).height < p.frames[i].height - 2 {
+            if edges.contains(where: { $0.0 == .bottom }) { origins[w.id]?.size.height = frame.height }
+            edges.removeAll { $0.0 == .bottom }
+        }
+        for (edge, coordinate) in edges {
             let (weights, ok) = solver.moving(tile: i, edge: edge, to: coordinate)
             if ok { solver.weights = weights; moved = true }
         }
@@ -343,7 +477,7 @@ extension Engine {
         if n > Layouts.maxCount(shape: d.shape) || (n == 5 && kind != .side) {
             return n == 5 ? "5 needs Side on an ultrawide or vertical screen" : nil
         }
-        let size = d.visible.insetBy(dx: prefs.effectiveOuterGap, dy: prefs.effectiveOuterGap).size
+        let size = workArea(d).size
         if n > Layouts.capacity(kind, shape: d.shape, size: size) {
             return kind == .columns ? "Too narrow for \(n) columns" : "Too small for \(n) \(kind == .rows ? "rows" : "windows")"
         }
@@ -405,7 +539,7 @@ extension Engine {
             return
         }
         zoomed[w.key] = w.id
-        let rect = d.visible.insetBy(dx: prefs.effectiveOuterGap, dy: prefs.effectiveOuterGap)
+        let rect = workArea(d)
         apply(rect, to: w)
         w.element.perform(kAXRaiseAction)
         Visuals.shared.update()
@@ -449,7 +583,7 @@ extension Engine {
         state.order = state.order.filter { state.windows.contains($0) && windows[$0] != nil }
         for id in state.windows where !state.order.contains(id) && windows[id] != nil { state.order.append(id) }
         cleanSpace = state
-        let rect = d.visible.insetBy(dx: prefs.effectiveOuterGap, dy: prefs.effectiveOuterGap)
+        let rect = workArea(d)
         let n = state.order.count
         if n > 0 {
             let tree = Layouts.tree(.grid, shape: d.shape, count: min(n, 4), main: 0.5)
@@ -477,6 +611,22 @@ extension Engine {
         reconcile(retileAll: true)
         if let d = currentDisplay {
             Toast.show(movedBack == 0 ? "Everything was in place" : "Put \(movedBack) window\(movedBack == 1 ? "" : "s") back", on: d)
+        }
+    }
+}
+
+// MARK: - Quitting
+
+extension Engine {
+    /// Puts each tiled window back where it was before Nook moved it. Skips
+    /// windows the user floated and places on screens that are gone.
+    func restoreOrigins() {
+        guard started, canTile, prefs.restoreOnQuit else { return }
+        let screens = Displays.all()
+        for w in windows.values where w.mode == .tiled || w.mode == .autoFloated {
+            guard let origin = origins[w.id],
+                  screens.contains(where: { $0.visible.contains(CGPoint(x: origin.midX, y: origin.midY)) }) else { continue }
+            w.element.setFrame(origin)
         }
     }
 }
